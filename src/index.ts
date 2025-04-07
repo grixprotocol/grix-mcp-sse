@@ -20,47 +20,68 @@ const server = new Server(
 	}
 );
 
-const GRIX_API_KEY = process.env.GRIX_API_KEY;
+// Create a map to store SDK instances per API key
+const sdkInstances: Map<string, GrixSDK> = new Map();
 
-const grixSDK = await GrixSDK.initialize({
-	apiKey: GRIX_API_KEY || "",
-});
-
-const { schemas, handleOperation } = grixSDK.mcp;
-
-const allSchemas = schemas.map((schema) => schema.schema);
-
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-	return {
-		tools: allSchemas,
-	};
-});
-
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-	const { name, arguments: args } = request.params;
-	return await handleOperation(name, args);
-});
+// Function to get or create SDK instance
+async function getSDKInstance(apiKey: string) {
+	if (!sdkInstances.has(apiKey)) {
+		const sdk = await GrixSDK.initialize({
+			apiKey: apiKey,
+		});
+		sdkInstances.set(apiKey, sdk);
+	}
+	return sdkInstances.get(apiKey)!;
+}
 
 // Set up Express app and transport lookup
 const app = express();
 const transports: { [sessionId: string]: SSEServerTransport } = {};
 
 // Handle SSE connections
-app.get("/sse", async (_req: Request, res: Response) => {
-	console.log("_req", _req);
+app.get("/sse", async (req: Request, res: Response) => {
+	const apiKey = req.query.apiKey as string;
+	console.log("apiKey-query", apiKey);
+	if (!apiKey) {
+		res.status(400).send("API key is required");
+		return;
+	}
 
-	console.error(`📡 New SSE connection request received at ${new Date().toISOString()}`);
-	const transport = new SSEServerTransport("/messages", res);
-	transports[transport.sessionId] = transport;
-	console.error(`✅ SSE connection established - Session ID: ${transport.sessionId}`);
+	try {
+		// Get or create SDK instance for this API key
+		const grixSDK = await getSDKInstance(apiKey);
+		const { schemas, handleOperation } = grixSDK.mcp;
+		const allSchemas = schemas.map((schema) => schema.schema);
 
-	res.on("close", () => {
-		console.error(`🔌 SSE connection closed - Session ID: ${transport.sessionId}`);
-		delete transports[transport.sessionId];
-		console.error(`📊 Active SSE connections: ${Object.keys(transports).length}`);
-	});
+		// Update the server handlers with this SDK instance
+		server.setRequestHandler(ListToolsRequestSchema, async () => {
+			return {
+				tools: allSchemas,
+			};
+		});
 
-	await server.connect(transport);
+		server.setRequestHandler(CallToolRequestSchema, async (request) => {
+			const { name, arguments: args } = request.params;
+			return await handleOperation(name, args);
+		});
+
+		console.error(`📡 New SSE connection request received at ${new Date().toISOString()}`);
+		const transport = new SSEServerTransport("/messages", res);
+		transports[transport.sessionId] = transport;
+
+		console.error(`✅ SSE connection established - Session ID: ${transport.sessionId}`);
+
+		res.on("close", () => {
+			console.error(`🔌 SSE connection closed - Session ID: ${transport.sessionId}`);
+			delete transports[transport.sessionId];
+			console.error(`📊 Active SSE connections: ${Object.keys(transports).length}`);
+		});
+
+		await server.connect(transport);
+	} catch (error) {
+		console.error("Error establishing SSE connection:", error);
+		res.status(500).send("Failed to initialize connection");
+	}
 });
 
 // Handle messages
