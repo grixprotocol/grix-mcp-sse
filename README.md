@@ -31,5 +31,3 @@ Start the server:
 ```bash
 pnpm start
 ```
-
-
